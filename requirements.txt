@@ -2,3 +2,5 @@ streamlit
 pandas
 streamlit-autorefresh
 opencv-python
+pyzbar
+pillow
