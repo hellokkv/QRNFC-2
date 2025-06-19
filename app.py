@@ -3,20 +3,13 @@ import sqlite3
 import pandas as pd
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
-
-# Use streamlit-qrcode-scanner for back camera support
-try:
-    from streamlit_qrcode_scanner import qrcode_scanner
-    QR_SCANNER_AVAILABLE = True
-except ImportError:
-    QR_SCANNER_AVAILABLE = False
-
 import cv2
 from pyzbar.pyzbar import decode
 from PIL import Image
 import numpy as np
 
 #======DB Setup===================
+
 def create_tables():
     conn = sqlite3.connect('inventory.db', check_same_thread=False)
     c = conn.cursor()
@@ -72,6 +65,7 @@ def create_tables():
 create_tables()
 
 # ---- DB HELPERS -------
+
 def get_db_connection():
     conn = sqlite3.connect('inventory.db', check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -159,6 +153,7 @@ def get_drum_history(conn):
     return pd.read_sql_query("SELECT * FROM drum_history", conn)
 
 # ---- PAGES ------
+
 def dashboard(conn):
     st.title("📦 Drum Storage Grid Dashboard")
 
@@ -187,32 +182,31 @@ def dashboard(conn):
 def qr_page(conn):
     st.header("📷 Drum QR Scan (IN/OUT/Shift)")
 
-    # Only reset before widget creation!
+    if "drum_id_input" not in st.session_state:
+        st.session_state.drum_id_input = ""
     if "reset_drum_id" not in st.session_state:
         st.session_state.reset_drum_id = False
-    if "drum_id_input" not in st.session_state or st.session_state.reset_drum_id:
+    if st.session_state.reset_drum_id:
         st.session_state.drum_id_input = ""
         st.session_state.reset_drum_id = False
 
-    # --- QR SCAN: Use streamlit-qrcode-scanner for camera selection ---
-    st.subheader("Scan Drum QR Code")
-    drum_scanned = None
+    # ScanQR
+    camera_enabled = st.checkbox("Enable camera")
+    if camera_enabled:
+        image_data = st.camera_input("Scan Drum QR Code")
+        if image_data:
+            img = Image.open(image_data)
+            img_np = np.array(img)
+            img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+            decoded_objs = decode(img_bgr)
+            if decoded_objs:
+                scanned = decoded_objs[0].data.decode("utf-8").strip().upper()
+                st.session_state.drum_id_input = scanned
+                st.success(f"✅ Scanned Drum ID: {scanned}")
+            else:
+                st.warning("⚠️ No QR code detected. Try again.")
 
-    if QR_SCANNER_AVAILABLE:
-        st.caption("Tap the flip icon to use the back camera if needed.")
-        drum_scanned = qrcode_scanner(key="qrscanner")
-        if drum_scanned:
-            st.session_state.drum_id_input = drum_scanned
-            st.success(f"✅ Scanned Drum ID: {drum_scanned}")
-    else:
-        st.warning("QR scanner component not installed. Only manual or camera photo scanning available.")
-
-    # Fallback camera/photo scan for manual (front camera only)
-    st.info(
-        "Tip: If the QR scanner is not working or you prefer, use your phone's camera app to scan and paste the Drum ID below."
-    )
-
-    drum_id = st.text_input("Drum ID (scan or paste here)", value=st.session_state.drum_id_input, key="drum_id_input").strip().upper()
+    drum_id = st.text_input("Drum ID", value=st.session_state.drum_id_input, key="drum_id_input").strip().upper()
 
     if drum_id:
         drum = get_drum(conn, drum_id)
@@ -220,12 +214,13 @@ def qr_page(conn):
             st.success("Drum is currently IN storage. Details below:")
             st.json(dict(drum.iloc[0]))
 
+            # Mark as OUT and Shift Buttons
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("Mark as OUT / Retrieve Drum", key="out_btn"):
                     if update_drum_out(conn, drum_id):
                         st.success(f"Drum {drum_id} marked as OUT and grid freed. History logged.")
-                        st.session_state.reset_drum_id = True
+                        st.session_state.drum_id_input = ""
                         st.experimental_rerun()
                     else:
                         st.error("Could not update drum status. Try again or check drum/grid state.")
@@ -246,7 +241,7 @@ def qr_page(conn):
                             if shift_drum_grid(conn, drum_id, new_grid):
                                 st.success(f"Drum {drum_id} shifted to grid {new_grid}.")
                                 st.session_state["shift_mode"] = False
-                                st.session_state.reset_drum_id = True
+                                st.session_state.drum_id_input = ""
                                 st.experimental_rerun()
                             else:
                                 st.error("Could not shift drum. Try again.")
@@ -260,7 +255,7 @@ def qr_page(conn):
             quantity = st.text_input("Enter Quantity (No. of cells)", key="quantity_input")
             ra = st.text_input("RA Number", key="ra_input")
             cell_type = st.text_input("Cell Type (A type, B type, etc)", key="cell_type_input")
-            
+            #################################################
             available_grids = get_available_grids(conn)
             st.write("Available Grids:")
 
@@ -270,14 +265,9 @@ def qr_page(conn):
             def select_grid_callback(grid_id):
                 st.session_state.selected_grid = grid_id
 
-            # Header for neatness
-            grid_cols = st.columns([1, 1, 2, 1])
-            grid_cols[0].markdown("**GridID**")
-            grid_cols[1].markdown("**Status**")
-            grid_cols[2].markdown("**Current DrumID**")
-            grid_cols[3].markdown("**Action**")
+            # Show table with select buttons
             for idx, row in available_grids.iterrows():
-                cols = st.columns([1, 1, 2, 1])
+                cols = st.columns(4)
                 cols[0].write(row["GridID"])
                 cols[1].write(row["Status"])
                 cols[2].write(str(row["CurrentDrumID"]))
@@ -290,6 +280,7 @@ def qr_page(conn):
             else:
                 grid_id = None
 
+            # Place drum button becomes enabled only if a grid is selected and all details are filled
             if order_no and quantity and ra and cell_type and grid_id:
                 if st.button("IN / Place Drum in Grid"):
                     if not available_grids[available_grids["GridID"] == grid_id].empty:
@@ -299,11 +290,12 @@ def qr_page(conn):
                             update_drum_info(conn, drum_id, order_no, ra, cell_type, quantity)
                         update_drum_in(conn, drum_id, grid_id)
                         st.success(f"Drum {drum_id} placed in grid {grid_id}.")
-                        st.session_state.reset_drum_id = True
+                        st.session_state.drum_id_input = ""
                         st.session_state.selected_grid = None
                         st.experimental_rerun()
                     else:
                         st.error("Selected grid is not available or doesn't exist.")
+
 
 # ---- MAIN APP -------
 st.set_page_config(page_title="Drum Inventory", layout="wide")
